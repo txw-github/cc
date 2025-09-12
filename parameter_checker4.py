@@ -1440,6 +1440,94 @@ class ParameterChecker:
         
         return enhanced_error
 
+    def _execute_validation_chain(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
+                                 sector_id, rule_chain: Optional[List[str]] = None) -> Dict[str, Any]:
+        """执行完整的验证链条并记录每个步骤的结果"""
+        if rule_chain is None:
+            rule_chain = []
+            
+        # 避免循环调用
+        if rule_id in rule_chain:
+            return {'errors': [], 'chain_steps': []}
+            
+        current_chain = rule_chain + [rule_id]
+        chain_steps = []
+        all_errors = []
+        
+        # 执行当前规则
+        errors = self.execute_validation_rule(rule_id, data_groups, sector_id, rule_chain)
+        
+        # 记录当前步骤
+        rule = self.validation_rules[rule_id]
+        step_result = {
+            'rule_id': rule_id,
+            'check_type': rule['check_type'],
+            'mo_name': rule['mo_name'],
+            'status': 'success' if not errors else 'failed',
+            'errors': errors,
+            'chain_position': len(current_chain)
+        }
+        chain_steps.append(step_result)
+        all_errors.extend(errors)
+        
+        return {
+            'errors': all_errors,
+            'chain_steps': chain_steps
+        }
+    
+    def _format_validation_chain(self, chain_key: str, chain_errors: List[Dict[str, Any]]) -> str:
+        """格式化验证链条显示"""
+        # 解析链条中的规则
+        rule_steps = chain_key.split(' -> ')
+        formatted_parts = []
+        
+        for i, rule_id in enumerate(rule_steps):
+            # 检查该步骤是否有错误
+            step_errors = [e for e in chain_errors if e.get('rule_id') == rule_id]
+            
+            if step_errors:
+                error_summary = f"失败({len(step_errors)}个问题)"
+                formatted_parts.append(f"{rule_id}({error_summary})")
+            else:
+                formatted_parts.append(f"{rule_id}(成功)")
+        
+        return ' -> '.join(formatted_parts)
+    
+    def _log_error_details(self, error: Dict[str, Any]) -> None:
+        """记录错误详情"""
+        logger.info(f"   ❌ 【{error['check_type']}】{error.get('rule_id', 'N/A')} - {error['mo_name']}")
+        
+        # 显示参数信息
+        if 'param_name' in error:
+            logger.info(f"      📍 参数: {error['param_name']}")
+            # 显示参数含义（如果有的话）
+            if 'parameter_info' in error:
+                param_info = error['parameter_info']
+                if param_info.get('parameter_description'):
+                    logger.info(f"      💡 参数含义: {param_info['parameter_description']}")
+        
+        if 'param_names' in error:
+            logger.info(f"      📍 涉及参数: {', '.join(error['param_names'])}")
+            
+        logger.info(f"      🚫 错误: {error['message']}")
+        
+        # 显示期望值和实际值
+        if 'current_value' in error and 'expected_value' in error:
+            logger.info(f"      🎯 期望值: {error['expected_value']}")
+            logger.info(f"      📊 实际值: {error['current_value']}")
+            
+        # 处理多值参数的开关错误
+        if 'wrong_switches' in error and error['wrong_switches']:
+            logger.info(f"      🔧 开关错误详情:")
+            for switch_error in error['wrong_switches']:
+                logger.info(f"         • {switch_error['switch_name']}: 期望{switch_error['expected_state']} ≠ 实际{switch_error['actual_state']}")
+        
+        # 显示规则说明
+        if error.get('error_description') and error['error_description'] != 'nan':
+            logger.info(f"      📝 说明: {error['error_description']}")
+            
+        logger.info("")
+
     def _parse_value_descriptions(self, value_description: str) -> Dict[str, str]:
         """
         解析值描述字符串，提取各个开关的说明
@@ -1576,9 +1664,6 @@ class ParameterChecker:
 
     def validate_sector_data(self, data_groups: Dict[str, pd.DataFrame], sector_id) -> List[Dict[str, Any]]:
         """验证扇区数据"""
-        all_errors = []
-        executed_rule_chains = []  # 记录所有执行的规则链
-
         # 找到所有入口验证规则（没有被其他规则引用的规则）
         referenced_rules = set()
         for rule in self.validation_rules.values():
@@ -1590,17 +1675,14 @@ class ParameterChecker:
 
         logger.info(f"发现 {len(entry_rules)} 个入口验证规则: {entry_rules}")
 
-        # 执行每个入口规则
+        # 执行每个入口规则并生成完整的验证链条记录
+        validation_chain_records = []
         for rule_id in entry_rules:
-            errors, rule_chains = self.execute_validation_rule_with_tracking(rule_id, data_groups, sector_id)
-            all_errors.extend(errors)
-            executed_rule_chains.extend(rule_chains)
+            chain_record = self._execute_validation_chain(rule_id, data_groups, sector_id)
+            if chain_record and chain_record.get('errors'):  # 只记录有错误的链条
+                validation_chain_records.extend(chain_record['errors'])
 
-        # 生成规则关系总结
-        rule_summary = self._generate_rule_execution_summary(executed_rule_chains, all_errors)
-        logger.info(rule_summary)
-
-        return all_errors
+        return validation_chain_records
 
     def create_sample_excel(self) -> None:
         """创建示例Excel文件"""
@@ -2004,40 +2086,29 @@ class ParameterChecker:
             errors = self.validate_sector_data(sector_dfs, sector_id)
             all_errors.extend(errors)
 
-        # 输出结果
+        # 输出验证链条结果
         if all_errors:
-            logger.info(f"🔍 发现 {len(all_errors)} 个验证问题:")
-            for i, error in enumerate(all_errors, 1):
-                logger.info(f"   {i}. 【{error['check_type']}】{error.get('rule_id', 'N/A')} - {error['mo_name']}")
-                if 'param_name' in error:
-                    logger.info(f"      参数: {error['param_name']}")
-                if 'param_names' in error:
-                    logger.info(f"      参数: {', '.join(error['param_names'])}")
-                logger.info(f"      错误: {error['message']}")
-
-                # 处理多值参数的开关错误详情
-                if 'wrong_switches' in error and error['wrong_switches']:
-                    logger.info(f"      开关错误详情:")
-                    for switch_error in error['wrong_switches']:
-                        logger.info(
-                            f"        - {switch_error['switch_name']}: 期望{switch_error['expected_state']}, 实际{switch_error['actual_state']}")
-
-                    # 显示错误开关的描述
-                    if 'switch_descriptions' in error and error['switch_descriptions']:
-                        logger.info(f"      开关说明:")
-                        for desc in error['switch_descriptions']:
-                            logger.info(f"        - {desc}")
-
-                # 显示单值参数的期望值和实际值
-                elif 'current_value' in error and 'expected_value' in error:
-                    logger.info(f"      期望值: {error['expected_value']}")
-                    logger.info(f"      实际值: {error['current_value']}")
-
-                if error.get('error_description'):
-                    logger.info(f"      说明: {error['error_description']}")
-                logger.info("")
+            logger.info(f"🔍 检查结果 - 发现 {len(all_errors)} 个问题:")
+            
+            # 按规则链分组错误
+            chain_groups = {}
+            for error in all_errors:
+                rule_chain = error.get('rule_chain', [error.get('rule_id', 'UNKNOWN')])
+                chain_key = ' -> '.join(rule_chain) if isinstance(rule_chain, list) else str(rule_chain)
+                if chain_key not in chain_groups:
+                    chain_groups[chain_key] = []
+                chain_groups[chain_key].append(error)
+            
+            # 按验证链条显示结果
+            for i, (chain_key, chain_errors) in enumerate(chain_groups.items(), 1):
+                logger.info(f"\n📋 验证链条 {i}: {self._format_validation_chain(chain_key, chain_errors)}")
+                
+                # 显示失败的具体信息
+                for error in chain_errors:
+                    self._log_error_details(error)
+                    
         else:
-            logger.info("✅ 所有验证规则都通过了")
+            logger.info("✅ 所有验证链条都通过了！")
 
     def new_extract_param_details_fixed(self, expression: str) -> List[Dict[str, Any]]:
         """
@@ -2045,8 +2116,6 @@ class ParameterChecker:
         使用正确的递归下降解析，避免先剥离括号再分割导致的括号不匹配问题
         """
         try:
-            logger.info(f"🔧 使用完全重写的解析器解析表达式: {expression}")
-
             # 预处理：仅标准化，不删除任何括号
             expr = self._normalize_condition_expression(expression).strip()
 
@@ -2062,14 +2131,11 @@ class ParameterChecker:
             left_part = expr[:op_pos].strip()
             right_part = expr[op_pos + op_len:].strip()
 
-            logger.info(f"安全分割为: '{left_part}' {op_type} '{right_part}'")
-
             # 递归解析两部分
             result = []
             result.extend(self.new_extract_param_details_fixed(left_part))
             result.extend(self.new_extract_param_details_fixed(right_part))
 
-            logger.info(f"递归解析结果: {len(result)} 个参数")
             return result
 
         except Exception as e:
@@ -2150,13 +2216,11 @@ class ParameterChecker:
         if not expr:
             return []
 
-        logger.info(f"解析原子表达式: {expr}")
 
         # 检查是否被完整的括号包围
         if expr.startswith('(') and expr.endswith(')') and self.is_fully_wrapped_by_brackets(expr):
             # 去除外层括号，递归解析内部表达式
             inner_expr = expr[1:-1].strip()
-            logger.info(f"去除外层括号，递归解析: {inner_expr}")
             return self.new_extract_param_details_fixed(inner_expr)
 
         # 不是被括号包围的，应该是单个参数表达式
@@ -2171,7 +2235,6 @@ class ParameterChecker:
         if not expr:
             return None
 
-        logger.info(f"解析单个参数: {expr}")
 
         # 首先验证这个表达式中没有逻辑运算符（在括号外）
         if self.find_main_logical_op_safe(expr) is not None:
@@ -2188,10 +2251,8 @@ class ParameterChecker:
 
                     # 验证这是一个有效的分割
                     if param_name and param_value:
-                        logger.info(f"找到参数: '{param_name}' {operator} '{param_value}'")
                         return self._parse_param_detail(param_name, param_value, operator)
 
-        logger.warning(f"无法解析单个参数: {expr}")
         return None
 
     def parse_single_param_fixed(self, expr: str) -> Optional[Dict[str, Any]]:
@@ -2228,12 +2289,8 @@ def main():
         return False
 
 
-# These methods are now properly defined within the ParameterChecker class
-
-
 
 if __name__ == "__main__":
-
     success = main()
     if not success:
         exit(1)
