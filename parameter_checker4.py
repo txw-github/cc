@@ -1531,10 +1531,32 @@ class ParameterChecker:
         # 处理多值参数的开关错误
         if 'wrong_switches' in error and error['wrong_switches']:
             logger.info(f"      🔧 开关错误详情:")
+            
+            # 获取开关描述信息
+            switch_descriptions = {}
+            if 'switch_descriptions' in error:
+                # 解析开关描述列表
+                for desc in error['switch_descriptions']:
+                    if ':' in desc:
+                        switch_name, desc_text = desc.split(':', 1)
+                        switch_descriptions[switch_name.strip()] = desc_text.strip()
+            elif 'parameter_details' in error and error['parameter_details']:
+                # 从参数详情中解析开关描述
+                param_detail = error['parameter_details'][0]
+                value_desc = param_detail.get('value_description', '')
+                switch_descriptions = self._parse_value_descriptions(value_desc)
+            
             for switch_error in error['wrong_switches']:
-                logger.info(f"         • {switch_error['switch_name']}: 期望{switch_error['expected_state']} ≠ 实际{switch_error['actual_state']}")
-                # 显示开关含义
-                if 'description' in switch_error:
+                switch_name = switch_error['switch_name']
+                expected_state = switch_error['expected_state']
+                actual_state = switch_error['actual_state']
+                
+                logger.info(f"         • {switch_name}: 期望{expected_state} ≠ 实际{actual_state}")
+                
+                # 显示开关含义（如果有的话）
+                if switch_name in switch_descriptions:
+                    logger.info(f"           含义: {switch_descriptions[switch_name]}")
+                elif 'description' in switch_error:
                     logger.info(f"           含义: {switch_error['description']}")
         
         # 显示规则说明
