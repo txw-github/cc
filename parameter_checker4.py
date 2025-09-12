@@ -1476,7 +1476,7 @@ class ParameterChecker:
         }
     
     def _format_validation_chain(self, chain_key: str, chain_errors: List[Dict[str, Any]]) -> str:
-        """格式化验证链条显示"""
+        """格式化验证链条显示 - 显示完整链条，包括成功的步骤"""
         # 解析链条中的规则
         rule_steps = chain_key.split(' -> ')
         formatted_parts = []
@@ -1489,38 +1489,53 @@ class ParameterChecker:
                 error_summary = f"失败({len(step_errors)}个问题)"
                 formatted_parts.append(f"{rule_id}({error_summary})")
             else:
-                formatted_parts.append(f"{rule_id}(成功)")
+                formatted_parts.append(f"{rule_id}(检查没问题)")
         
         return ' -> '.join(formatted_parts)
     
     def _log_error_details(self, error: Dict[str, Any]) -> None:
         """记录错误详情"""
-        logger.info(f"   ❌ 【{error['check_type']}】{error.get('rule_id', 'N/A')} - {error['mo_name']}")
+        error_type = error.get('error_type', error.get('check_type', 'unknown'))
+        logger.info(f"   ❌ 【{error_type}】{error.get('rule_id', 'N/A')} - {error['mo_name']}")
         
         # 显示参数信息
         if 'param_name' in error:
             logger.info(f"      📍 参数: {error['param_name']}")
-            # 显示参数含义（如果有的话）
-            if 'parameter_info' in error:
-                param_info = error['parameter_info']
-                if param_info.get('parameter_description'):
-                    logger.info(f"      💡 参数含义: {param_info['parameter_description']}")
-        
-        if 'param_names' in error:
+        elif 'param_names' in error:
             logger.info(f"      📍 涉及参数: {', '.join(error['param_names'])}")
             
         logger.info(f"      🚫 错误: {error['message']}")
         
-        # 显示期望值和实际值
-        if 'current_value' in error and 'expected_value' in error:
-            logger.info(f"      🎯 期望值: {error['expected_value']}")
-            logger.info(f"      📊 实际值: {error['current_value']}")
-            
+        # 根据错误类型显示不同信息
+        if error_type == '漏配':
+            # 漏配只显示期望配置什么，不显示实际值（因为没有配置）
+            if 'expected_value' in error:
+                logger.info(f"      🎯 需要配置: {error['expected_value']}")
+        elif error_type == '错配':
+            # 错配显示期望值和实际值
+            if 'current_value' in error and 'expected_value' in error:
+                logger.info(f"      🎯 期望值: {error['expected_value']}")
+                logger.info(f"      📊 实际值: {error['current_value']}")
+        
+        # 显示参数含义（如果有的话）
+        if 'parameter_info' in error:
+            param_info = error['parameter_info']
+            if param_info.get('parameter_description'):
+                logger.info(f"      💡 参数含义: {param_info['parameter_description']}")
+        elif 'parameter_details' in error:
+            # 处理多个参数的含义
+            for detail in error['parameter_details']:
+                if detail.get('parameter_description'):
+                    logger.info(f"      💡 {detail['param_name']}: {detail['parameter_description']}")
+        
         # 处理多值参数的开关错误
         if 'wrong_switches' in error and error['wrong_switches']:
             logger.info(f"      🔧 开关错误详情:")
             for switch_error in error['wrong_switches']:
                 logger.info(f"         • {switch_error['switch_name']}: 期望{switch_error['expected_state']} ≠ 实际{switch_error['actual_state']}")
+                # 显示开关含义
+                if 'description' in switch_error:
+                    logger.info(f"           含义: {switch_error['description']}")
         
         # 显示规则说明
         if error.get('error_description') and error['error_description'] != 'nan':
