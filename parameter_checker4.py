@@ -1456,9 +1456,128 @@ class ParameterChecker:
 
         return descriptions
 
+    def execute_validation_rule_with_tracking(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
+                                             sector_id, rule_chain: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """执行验证规则并追踪规则链"""
+        if rule_chain is None:
+            rule_chain = []
+        
+        current_chain = rule_chain + [rule_id]
+        all_rule_chains = []
+        
+        # 执行规则并收集规则链信息
+        errors = self._execute_single_rule_with_tracking(rule_id, data_groups, sector_id, current_chain, all_rule_chains)
+        
+        return errors, all_rule_chains
+    
+    def _execute_single_rule_with_tracking(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
+                                          sector_id, current_chain: List[str], 
+                                          all_rule_chains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """执行单个规则并记录规则链信息"""
+        rule = self.validation_rules[rule_id]
+        logger.info(f"执行验证规则: {rule_id} ({rule['check_type']}), 规则链: {' -> '.join(current_chain)}")
+        
+        # 记录规则链信息
+        chain_info = {
+            'chain': current_chain.copy(),
+            'rule_id': rule_id,
+            'rule_type': rule['check_type'],
+            'description': rule['error_description'],
+            'status': 'executed',
+            'has_errors': False
+        }
+        
+        # 执行具体的验证逻辑
+        if rule['check_type'] == '漏配':
+            errors, validated_data_groups = self._check_missing_config(rule, data_groups, sector_id, current_chain)
+        elif rule['check_type'] == '错配':
+            errors, validated_data_groups = self._check_incorrect_config(rule, data_groups, sector_id, current_chain)
+        else:
+            errors, validated_data_groups = [], data_groups
+        
+        # 更新规则链状态
+        if errors:
+            chain_info['has_errors'] = True
+            chain_info['error_count'] = len(errors)
+        
+        all_rule_chains.append(chain_info)
+        
+        # 如果没有发现错误且有下一个检查规则，继续执行
+        next_check_id = rule.get('next_check_id', '')
+        if not errors and next_check_id:
+            logger.info(f"规则 {rule_id} 通过，继续执行: {next_check_id}")
+            next_chain = current_chain + [next_check_id]
+            next_errors = self._execute_single_rule_with_tracking(next_check_id, validated_data_groups, 
+                                                                sector_id, next_chain, all_rule_chains)
+            errors.extend(next_errors)
+        else:
+            if errors:
+                logger.info(f"规则 {rule_id} 检查失败，不继续后续验证")
+        
+        return errors
+
+    def _generate_rule_execution_summary(self, executed_rule_chains: List[Dict[str, Any]], 
+                                       all_errors: List[Dict[str, Any]]) -> str:
+        """生成规则执行总结"""
+        summary_lines = []
+        summary_lines.append("\n\ud83d\udcca 规则执行流程总结:")
+        summary_lines.append("=" * 50)
+        
+        # 统计总体情况
+        total_chains = len(executed_rule_chains)
+        error_chains = len([chain for chain in executed_rule_chains if chain['has_errors']])
+        total_errors = len(all_errors)
+        
+        summary_lines.append(f"📊 总体统计:")
+        summary_lines.append(f"   • 执行规则链数: {total_chains}")
+        summary_lines.append(f"   • 有问题的规则链: {error_chains}")
+        summary_lines.append(f"   • 发现问题总数: {total_errors}")
+        summary_lines.append("")
+        
+        # 详细规则链分析
+        summary_lines.append(f"🔍 验证流程分析:")
+        
+        for i, chain in enumerate(executed_rule_chains, 1):
+            chain_str = " -> ".join(chain['chain'])
+            status = "❌ 有问题" if chain['has_errors'] else "✅ 通过"
+            
+            summary_lines.append(f"   {i}. {chain_str}")
+            summary_lines.append(f"      状态: {status}")
+            summary_lines.append(f"      类型: {chain['rule_type']}")
+            
+            if chain['has_errors']:
+                summary_lines.append(f"      问题数: {chain.get('error_count', 0)}")
+            
+            summary_lines.append(f"      说明: {chain['description']}")
+            summary_lines.append("")
+        
+        # 问题类型统计
+        if all_errors:
+            error_types = {}
+            for error in all_errors:
+                error_type = error.get('error_type', '未知')
+                error_types[error_type] = error_types.get(error_type, 0) + 1
+            
+            summary_lines.append(f"📊 问题类型分布:")
+            for error_type, count in error_types.items():
+                summary_lines.append(f"   • {error_type}: {count} 个")
+            summary_lines.append("")
+        
+        summary_lines.append("💡 建议:")
+        if total_errors == 0:
+            summary_lines.append("   • 所有验证规则都通过，配置正常！")
+        else:
+            summary_lines.append(f"   • 发现 {total_errors} 个配置问题，建议优先处理错配问题")
+            summary_lines.append("   • 检查规则链中的前置条件是否满足")
+        
+        summary_lines.append("=" * 50)
+        
+        return "\n".join(summary_lines)
+
     def validate_sector_data(self, data_groups: Dict[str, pd.DataFrame], sector_id) -> List[Dict[str, Any]]:
         """验证扇区数据"""
         all_errors = []
+        executed_rule_chains = []  # 记录所有执行的规则链
 
         # 找到所有入口验证规则（没有被其他规则引用的规则）
         referenced_rules = set()
@@ -1473,8 +1592,13 @@ class ParameterChecker:
 
         # 执行每个入口规则
         for rule_id in entry_rules:
-            errors = self.execute_validation_rule(rule_id, data_groups, sector_id)
+            errors, rule_chains = self.execute_validation_rule_with_tracking(rule_id, data_groups, sector_id)
             all_errors.extend(errors)
+            executed_rule_chains.extend(rule_chains)
+
+        # 生成规则关系总结
+        rule_summary = self._generate_rule_execution_summary(executed_rule_chains, all_errors)
+        logger.info(rule_summary)
 
         return all_errors
 
