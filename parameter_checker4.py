@@ -1440,84 +1440,64 @@ class ParameterChecker:
         
         return enhanced_error
 
-    def _execute_validation_chain_complete(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
-                                         sector_id, rule_chain: Optional[List[str]] = None) -> Dict[str, Any]:
-        """执行完整的验证链条并记录每个步骤的结果（包括成功和失败）"""
-        if rule_chain is None:
-            rule_chain = []
+    def _execute_validation_chain_simple(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
+                                        sector_id, visited_rules: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+        """执行简单的验证链 - 返回List结构，只传递通过的数据"""
+        if visited_rules is None:
+            visited_rules = set()
             
         # 避免循环调用
-        if rule_id in rule_chain:
-            return {
-                'chain_id': rule_id,
-                'sector_id': sector_id,
-                'steps': [],
-                'errors': [],
-                'has_errors': False,
-                'chain_status': 'skipped_circular'
-            }
+        if rule_id in visited_rules:
+            return []
             
-        current_chain = rule_chain + [rule_id]
-        chain_steps = []
-        all_errors = []
+        visited_rules.add(rule_id)
+        validation_steps = []
         current_data = data_groups.copy()
-        step_number = 1
-        
         current_rule_id = rule_id
         
         while current_rule_id and current_rule_id in self.validation_rules:
             rule = self.validation_rules[current_rule_id]
             
             # 执行当前规则
-            errors = self.execute_validation_rule(current_rule_id, current_data, sector_id, current_chain)
+            errors = self.execute_validation_rule(current_rule_id, current_data, sector_id, [])
             
-            # 记录当前步骤（包括成功和失败）
-            step_result = {
-                'step_number': step_number,
+            # 记录步骤结果（简单结构）
+            step = {
                 'rule_id': current_rule_id,
                 'check_type': rule['check_type'],
                 'mo_name': rule['mo_name'],
                 'rule_description': rule['error_description'],
-                'condition_expression': rule['condition_expression'],
-                'expected_expression': rule['expected_expression'],
                 'status': 'success' if not errors else 'failed',
-                'has_errors': bool(errors),
-                'errors': errors,
-                'chain_position': step_number
+                'errors': errors if errors else None,
+                'passed_data_count': sum(len(df) for df in current_data.values()) if not errors else 0
             }
-            chain_steps.append(step_result)
+            validation_steps.append(step)
             
+            # 关键：如果有错误，停止后续验证；如果成功，传递通过的数据
             if errors:
-                all_errors.extend(errors)
-                # 如果有错误，停止后续验证
                 break
+            
+            # 只传递通过验证的数据给下一个规则
+            # 这里需要根据验证结果过滤数据
+            current_data = self._get_passed_data(rule, current_data, errors)
             
             # 继续下一个规则
             next_rule_id = rule.get('next_check_id', '')
-            if not next_rule_id or pd.isna(next_rule_id):
-                break
-            next_rule_id = str(next_rule_id).strip()
-            if not next_rule_id:
+            if not next_rule_id or pd.isna(next_rule_id) or str(next_rule_id).strip() == '':
                 break
                 
-            current_rule_id = next_rule_id
-            step_number += 1
+            current_rule_id = str(next_rule_id).strip()
         
-        # 生成链条总结
-        chain_key = ' -> '.join([step['rule_id'] for step in chain_steps])
-        has_errors = len(all_errors) > 0
-        
-        return {
-            'chain_id': rule_id,
-            'chain_key': chain_key,
-            'sector_id': sector_id,
-            'steps': chain_steps,
-            'errors': all_errors,
-            'has_errors': has_errors,
-            'total_steps': len(chain_steps),
-            'failed_at_step': next((step['step_number'] for step in chain_steps if step['has_errors']), 0),
-            'chain_status': 'failed' if has_errors else 'success'
-        }
+        return validation_steps
+    
+    def _get_passed_data(self, rule: Dict[str, Any], current_data: Dict[str, pd.DataFrame], errors: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
+        """获取通过验证的数据，只传递给下一个规则"""
+        # 如果没有错误，返回全部数据；如果有错误，返回空数据
+        if not errors:
+            return current_data
+        else:
+            # 返回空数据集，因为验证失败
+            return {mo_name: pd.DataFrame() for mo_name in current_data.keys()}
     
     def _format_validation_chain(self, chain_key: str, chain_errors: List[Dict[str, Any]]) -> str:
         """格式化验证链条显示 - 显示完整链条，包括成功的步骤"""
@@ -1763,36 +1743,50 @@ class ParameterChecker:
         
         return "\n".join(summary_lines)
 
-    def _display_sector_validation_results(self, sector_results: Dict[str, Dict[str, Any]]) -> None:
-        """按扇区显示简化的验证结果"""
-        total_sectors = len(sector_results)
-        sectors_with_errors = sum(1 for result in sector_results.values() if result['has_any_errors'])
+    def _display_simple_validation_results(self, chain_errors: Dict[str, List[Dict[str, Any]]]) -> None:
+        """显示简化的验证结果 - 清晰的链表结构"""
+        total_sectors = len(chain_errors)
+        sectors_with_errors = sum(1 for steps in chain_errors.values() 
+                                if any(step['status'] == 'failed' for step in steps))
         
         logger.info(f"🔍 检查结果总览 - 共{total_sectors}个扇区，{sectors_with_errors}个扇区有问题:")
         
-        for sector_id, sector_result in sector_results.items():
+        for sector_id, validation_steps in chain_errors.items():
             logger.info(f"\n📍 扇区 {sector_id}:")
             
-            if not sector_result['has_any_errors']:
+            # 检查是否有错误
+            error_steps = [step for step in validation_steps if step['status'] == 'failed']
+            
+            if not error_steps:
                 logger.info("   ✅ 所有验证规则都通过了！")
-                # 显示成功的验证链条
-                for i, chain in enumerate(sector_result['validation_chains'], 1):
-                    chain_display = self._format_complete_validation_chain(chain)
-                    logger.info(f"   📋 验证链条 {i}: {chain_display}")
             else:
-                logger.info(f"   ❌ 发现 {len(sector_result['errors'])} 个问题")
-                
-                # 显示每个验证链条的结果
-                for i, chain in enumerate(sector_result['validation_chains'], 1):
-                    chain_display = self._format_complete_validation_chain(chain)
-                    logger.info(f"   📋 验证链条 {i}: {chain_display}")
+                total_errors = sum(len(step['errors']) for step in error_steps if step['errors'])
+                logger.info(f"   ❌ 发现 {total_errors} 个问题")
+            
+            # 显示验证链条（简化版）
+            chain_display_parts = []
+            for step in validation_steps:
+                if step['status'] == 'success':
+                    chain_display_parts.append(f"{step['rule_id']}(通过)")
+                else:
+                    error_count = len(step['errors']) if step['errors'] else 0
+                    chain_display_parts.append(f"{step['rule_id']}(失败{error_count}个)")
+            
+            chain_display = ' -> '.join(chain_display_parts)
+            logger.info(f"   📋 验证链: {chain_display}")
+            
+            # 只显示失败步骤的简化错误信息
+            for step in error_steps:
+                logger.info(f"   ❌ 【{step['check_type']}】{step['rule_id']} - {step['mo_name']}")
+                if step['errors']:
+                    for error in step['errors'][:3]:  # 最多显示3个错误，避免过多重复信息
+                        if 'param_name' in error:
+                            logger.info(f"     📍 {error['param_name']}: 期望 {error.get('expected_value', 'N/A')}, 实际 {error.get('current_value', 'N/A')}")
+                        else:
+                            logger.info(f"     📍 {error.get('message', '未知错误')}")
                     
-                    # 只显示失败的步骤详情，避免重复
-                    for step in chain['steps']:
-                        if step['has_errors']:
-                            logger.info(f"      ❌ 【{step['check_type']}】{step['rule_id']} - {step['mo_name']}")
-                            # 简化错误详情显示，避免重复记录
-                            self._log_simplified_error_details(step['errors'])
+                    if len(step['errors']) > 3:
+                        logger.info(f"     📝 还有 {len(step['errors']) - 3} 个相似问题...")
     
     def _format_complete_validation_chain(self, chain: Dict[str, Any]) -> str:
         """格式化完整的验证链条显示，包括成功和失败的步骤"""
@@ -1807,9 +1801,9 @@ class ParameterChecker:
         
         return ' -> '.join(formatted_parts)
 
-    def validate_sector_data(self, data_groups: Dict[str, pd.DataFrame], sector_id) -> Dict[str, Any]:
-        """验证扇区数据 - 返回完整的验证链条记录（包括成功和失败）"""
-        # 找到所有入口验证规则（没有被其他规则引用的规则）
+    def validate_sector_data(self, data_groups: Dict[str, pd.DataFrame], sector_id) -> List[Dict[str, Any]]:
+        """验证扇区数据 - 返回简单的验证链表"""
+        # 找到所有入口验证规则
         referenced_rules = set()
         for rule in self.validation_rules.values():
             if rule['next_check_id']:
@@ -1820,29 +1814,14 @@ class ParameterChecker:
 
         logger.info(f"发现 {len(entry_rules)} 个入口验证规则: {entry_rules}")
 
-        # 执行每个入口规则并生成完整的验证链条记录
-        all_validation_chains = []
-        all_errors = []
+        # 每个入口规则生成一个验证链（简单的list结构）
+        validation_chain = []
         
         for rule_id in entry_rules:
-            chain_record = self._execute_validation_chain_complete(rule_id, data_groups, sector_id)
-            all_validation_chains.append(chain_record)
-            # 收集所有错误
-            if chain_record.get('has_errors'):
-                all_errors.extend(chain_record.get('errors', []))
+            chain_steps = self._execute_validation_chain_simple(rule_id, data_groups.copy(), sector_id)
+            validation_chain.extend(chain_steps)
 
-        return {
-            'sector_id': sector_id,
-            'validation_chains': all_validation_chains,
-            'errors': all_errors,
-            'has_any_errors': len(all_errors) > 0,
-            'summary': {
-                'total_chains': len(all_validation_chains),
-                'failed_chains': sum(1 for chain in all_validation_chains if chain.get('has_errors', False)),
-                'successful_chains': sum(1 for chain in all_validation_chains if not chain.get('has_errors', False)),
-                'total_errors': len(all_errors)
-            }
-        }
+        return validation_chain
 
     def create_sample_excel(self) -> None:
         """创建示例Excel文件"""
@@ -2246,22 +2225,18 @@ class ParameterChecker:
         chain_errors = {}  # 以sectorId为key的数据结构
         for sector_id, sector_dfs in sector_datas.items():
             sector_result = self.validate_sector_data(sector_dfs, sector_id)
-            # 简化数据结构 - 以sectorId为key，包含验证链和汇总信息
-            chain_errors[sector_id] = {
-                'validation_chains': sector_result['validation_chains'], # 包含成功和失败的完整链条
-                'errors': sector_result['errors'], # 仅错误列表
-                'has_any_errors': sector_result['has_any_errors'],
-                'summary': sector_result['summary'] # 汇总信息
-            }
+            # 简化数据结构 - 以sectorId为key，值为简单的验证链表
+            chain_errors[sector_id] = sector_result  # sector_result已经是简单的list结构
         
-        # 添加数据结构验证日志
+        # 数据结构验证日志
         logger.info(f"📊 数据结构确认 - chain_errors以sectorId为key:")
-        for sector_id, sector_data in chain_errors.items():
-            summary = sector_data['summary']
-            logger.info(f"   扇区 {sector_id}: {summary['total_chains']}个验证链, {summary['total_errors']}个错误")
+        for sector_id, validation_chain in chain_errors.items():
+            total_steps = len(validation_chain)
+            error_steps = sum(1 for step in validation_chain if step['status'] == 'failed')
+            logger.info(f"   扇区 {sector_id}: {total_steps}个验证步骤, {error_steps}个失败")
         
         # 显示每个扇区的验证结果
-        self._display_sector_validation_results(chain_errors)
+        self._display_simple_validation_results(chain_errors)
 
     def new_extract_param_details_fixed(self, expression: str) -> List[Dict[str, Any]]:
         """
