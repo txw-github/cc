@@ -1829,8 +1829,7 @@ class ParameterChecker:
 
         # 删除默认工作表
         if wb.active:
-            default_ws = wb.active
-            wb.remove(default_ws)
+            wb.remove(wb.active)
 
         # 创建参数信息表
         self._create_parameter_info_sheet(wb)
