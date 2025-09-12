@@ -1,61 +1,72 @@
-# Project Documentation
+# 5G网络参数验证系统文档
 
-## Overview
+## 项目概述
 
-This project requires repository analysis to provide a complete overview. Once the codebase is available, this section will include:
-- Project purpose and main functionality
-- Target audience or use case
-- Key features and capabilities
+这是一个中文5G网络参数验证系统，用于检查配置数据是否符合存储在Excel文件中的验证规则，具有精简的错误报告和完整的验证链条工作流程显示。
 
-## User Preferences
+### 主要功能
+- **双分表设计**：参数信息与验证规则完全分离，便于维护
+- **复杂条件支持**：支持复杂的逻辑表达式如 (param1=value1 and param2=value2) or (param3>value3)
+- **嵌套验证链**：支持漏配↔错配的无限嵌套调用验证
+- **多值参数处理**：支持 beam1:开&beam2:关&beam3:开 格式的多值参数
+- **智能条件筛选**：先筛选符合条件的行再进行验证
 
-Preferred communication style: Simple, everyday language.
+### 目标用户
+5G网络运维工程师和系统管理员
 
-## System Architecture
+## 用户偏好
 
-### Frontend Architecture
-- Framework and technology stack to be determined from repository analysis
-- Component structure and organization patterns
-- State management approach
-- Routing and navigation strategy
+交流风格：简单、日常语言，避免技术术语
 
-### Backend Architecture
-- Server framework and runtime environment
-- API design patterns (REST, GraphQL, etc.)
-- Request/response handling
-- Middleware and authentication flow
+## 系统架构
 
-### Data Storage
-- Database technology and setup
-- Schema design and relationships
-- Data access patterns
-- Migration and versioning strategy
+### 核心组件
+- **ParameterChecker类**：主要的验证引擎
+- **Excel数据源**：参数知识库.xlsx 包含参数信息和验证规则
+- **验证链条系统**：完整的规则链执行和跟踪机制
 
-### Authentication & Authorization
-- Authentication method and provider
-- User management system
-- Permission and role-based access control
-- Security measures and best practices
+### 数据结构
+- **参数信息表**：存储MO参数的基本信息和含义描述
+- **验证规则表**：定义各种验证规则（漏配/错配）和条件表达式
+- **验证链条记录**：完整记录每个验证步骤的执行状态
 
-## External Dependencies
+## 最新改进 (2025-09-12)
 
-### Third-Party Services
-- Authentication providers
-- Payment processing
-- Email services
-- Cloud storage solutions
+### 1. 简化冗余信息输出
+- 移除了过多的调试日志信息（如"🔧 使用完全重写的解析器解析表达式"等重复信息）
+- 精简了重复的状态信息，提高输出的可读性
 
-### APIs and Integrations
-- External API connections
-- Webhook implementations
-- Data synchronization services
+### 2. 验证链条记录重构
+- **错误记录格式完全重构**：从简单错误列表改为完整的验证链条记录
+- **工作流程可视化**：清楚显示 "MISS_002(成功) -> ERROR_004(失败(1个问题))" 的验证步骤
+- **只显示失败参数的含义**：避免显示所有配置的冗余信息，只为错误参数提供详细说明
 
-### Development Tools
-- Package managers and dependencies
-- Build tools and bundlers
-- Testing frameworks
-- Deployment and hosting platforms
+### 3. 增强的错误报告
+- 使用图标区分不同信息类型（❌📍🚫🎯📊📝）
+- 结构化显示参数名称、期望值、实际值和含义描述
+- 支持单个规则多个错误的清晰展示
+
+## 技术栈
+
+### 主要依赖
+- **Python 3.x**：主要编程语言
+- **pandas**：数据处理和Excel文件读取
+- **openpyxl**：Excel文件操作
+
+### 工具配置
+- **Workflow**: "Parameter Checker" - 自动运行参数检查系统
+- **日志系统**: 结构化日志输出，支持验证链条跟踪
+
+## 文件结构
+
+```
+├── parameter_checker4.py     # 主要验证系统代码
+├── 参数知识库.xlsx           # 参数信息和验证规则数据源
+├── pyproject.toml           # 项目依赖配置
+├── uv.lock                  # 锁定的依赖版本
+└── replit.md               # 项目文档
+```
 
 ---
 
-*Note: This documentation will be updated with specific details once the repository contents are analyzed.*
+*最后更新：2025-09-12*
