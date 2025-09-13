@@ -799,7 +799,7 @@ class ParameterChecker:
                     })
 
         return {'type': 'simple', 'params': expected_params}
-
+###################
     # def validate_complex_expected_expression(self, expression: str, data_row: Dict[str, Any]) -> bool:
     #     """
     #     验证复杂的期望值表达式
@@ -949,38 +949,19 @@ class ParameterChecker:
         # 如果包含 'and' 或没有逻辑运算符，所有都必须为True
         return all(param_results)
 
-    def _validate_multi_value_parameter(self, actual_value: str, expected_value: str) -> bool:
-        """验证多值参数"""
-        if not actual_value or not expected_value:
-            return False
 
-        # 解析期望的开关状态
-        expected_switches = {}
-        for switch_expr in expected_value.split('&'):
-            if ':' in switch_expr:
-                switch_name, switch_state = switch_expr.split(':', 1)
-                expected_switches[switch_name.strip()] = switch_state.strip()
-
-        # 使用现有的多值匹配逻辑
-        is_match, _ = self._check_multi_value_match(actual_value, expected_switches)
-        return is_match
-
-    def execute_validation_rule(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], sector_id, 
-                               rule_chain: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def execute_validation_rule(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], sector_id,
+                                chain_steps) -> List[Dict[str, Any]]:
         """执行单个验证规则 - 修正版：支持数据筛选和传递，增加规则链跟踪"""
         if rule_id not in self.validation_rules:
             logger.warning(f"验证规则 {rule_id} 不存在")
             return []
+            # 记录步骤（简化结构）
 
-        # 初始化或扩展规则链
-        if rule_chain is None:
-            rule_chain = []
-        current_rule_chain = rule_chain + [rule_id]
-        
+
         rule = self.validation_rules[rule_id]
         errors = []
 
-        logger.info(f"执行验证规则: {rule_id} ({rule['check_type']}), 规则链: {' -> '.join(current_rule_chain)}")
 
         # 深拷贝数据，避免修改原始数据
         import copy
@@ -988,12 +969,12 @@ class ParameterChecker:
 
         # 根据校验类型执行不同的验证，并获取通过验证的数据
         if rule['check_type'] == '漏配':
-            check_errors, passed_data = self._check_missing_config(rule, working_data_groups, sector_id, current_rule_chain)
+            check_errors, passed_data = self._check_missing_config(rule, working_data_groups, sector_id)
             errors.extend(check_errors)
             # 漏配检查后，传递找到期望配置的数据给后续验证
             filtered_data_groups = passed_data
         elif rule['check_type'] == '错配':
-            check_errors, passed_data = self._check_incorrect_config(rule, working_data_groups, sector_id, current_rule_chain)
+            check_errors, passed_data = self._check_incorrect_config(rule, working_data_groups, sector_id)
             errors.extend(check_errors)
             # 错配检查后，传递实际值与期望值匹配的数据给后续验证
             filtered_data_groups = passed_data
@@ -1001,23 +982,30 @@ class ParameterChecker:
             logger.warning(f"未知的校验类型: {rule['check_type']}")
             filtered_data_groups = working_data_groups
 
+
+        step = {
+            'type': rule['check_type'],
+            'mo': rule['mo_name'],
+            'desc': rule['error_description'],
+            'status': 'pass' if not errors else 'fail',
+            'error_count': len(errors) if errors else 0,
+            'errors': errors
+        }
+        chain_steps.append(step)
+
         # 如果当前规则通过且有继续校验，使用筛选后的数据执行继续校验
         if not errors and rule['next_check_id']:
             logger.info(f"规则 {rule_id} 通过，继续执行: {rule['next_check_id']}")
-            errors.extend(self.execute_validation_rule(rule['next_check_id'], filtered_data_groups, sector_id, current_rule_chain))
+            errors.extend(self.execute_validation_rule(rule['next_check_id'], filtered_data_groups, sector_id,
+                                                       chain_steps))
         elif errors:
             logger.info(f"规则 {rule_id} 检查失败，不继续后续验证")
 
         return errors
 
-    def _filter_data_by_validation_result(self, data_groups: Dict[str, pd.DataFrame], rule: Dict[str, Any],
-                                          passed_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-        """根据验证结果筛选数据，返回通过验证的数据子集"""
-        # 返回通过验证的数据（去除了错配/漏配的数据）
-        return passed_data
 
-    def _check_missing_config(self, rule: Dict[str, Any], data_groups: Dict[str, pd.DataFrame], sector_id, 
-                             rule_chain: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
+    def _check_missing_config(self, rule: Dict[str, Any], data_groups: Dict[str, pd.DataFrame], sector_id) -> Tuple[
+        List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
         """检查漏配"""
         mo_name = rule['mo_name']
         condition_expr = rule['condition_expression']
@@ -1028,11 +1016,8 @@ class ParameterChecker:
         if mo_name not in data_groups:
             errors.append({
                 'sector_id': "",
-                'rule_id': rule['rule_id'],
                 'mo_name': mo_name,
-                'check_type': '漏配',
                 'error_type': '数据不存在',
-                'message': f'{mo_name}数据不存在',
                 'error_description': rule['error_description']
             })
             return errors, {}
@@ -1105,12 +1090,12 @@ class ParameterChecker:
             # 获取参数详细信息列表
             param_details = []
             param_names = []
-            
+
             for param in expected_result['params']:
                 param_name = param['param_name']
                 param_names.append(param_name)
                 param_info = self._get_parameter_info(mo_name, param_name)
-                
+
                 param_detail = {
                     'param_name': param_name,
                     'expected_value': param.get('expected_value', ''),
@@ -1118,32 +1103,29 @@ class ParameterChecker:
                     'value_description': param_info['value_description'],
                     'parameter_type': param_info['parameter_type']
                 }
-                
+
                 # 对于多值参数，添加开关信息
                 if param.get('param_type') == 'multiple' and param.get('expected_switches'):
                     switch_descriptions = self._parse_value_descriptions(param_info['value_description'])
                     param_detail['expected_switches'] = param['expected_switches']
                     param_detail['switch_descriptions'] = switch_descriptions
-                    
+
                 param_details.append(param_detail)
 
             base_error = {
                 'sector_id': sector_id,
-                'rule_id': rule['rule_id'],
                 'mo_name': mo_name,
                 'param_names': param_names,
-                'check_type': '漏配',
                 'error_type': '漏配',
-                'message': f'未找到符合条件的配置记录',
                 'condition': condition_expr,
                 'expected_expression': expected_expr,
                 'error_description': rule['error_description'],
                 'matched_condition_rows': len(condition_matched_rows),  # 满足条件但不满足期望的行数
                 'total_rows': len(mo_data)  # 总数据行数
             }
-            
+
             # 创建增强的错误记录
-            enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details, rule_chain)
+            enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details)
             errors.append(enhanced_error)
 
         # 构建返回的数据字典：只包含满足期望表达式的数据行
@@ -1157,23 +1139,23 @@ class ParameterChecker:
 
         return errors, validated_data_groups
 
-    def _check_incorrect_config(self, rule: Dict[str, Any], data_groups: Dict[str, pd.DataFrame], sector_id, 
-                               rule_chain: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
+    def _check_incorrect_config(self, rule: Dict[str, Any], data_groups: Dict[str, pd.DataFrame], sector_id) -> Tuple[
+        List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
         """检查错配"""
         mo_name = rule['mo_name']
         condition_expr = rule['condition_expression']
         expected_expr = rule['expected_expression']
 
         errors = []
-
+        param_details= {
+            'mo_name': mo_name,
+            'mo_description': self._get_mo_description(mo_name),
+        }
         if mo_name not in data_groups:
             errors.append({
                 'sector_id': "",
-                'rule_id': rule['rule_id'],
                 'mo_name': mo_name,
-                'check_type': '错配',
                 'error_type': '数据不存在',
-                'message': f'{mo_name}数据不存在',
                 'error_description': rule['error_description']
             })
             return errors, {}  # 数据不存在时不报错配错误
@@ -1182,7 +1164,7 @@ class ParameterChecker:
         expected_result = self.parse_expected_expression(expected_expr)
 
         if expected_result['type'] == 'simple' and not expected_result['params']:
-            logger.warning(f"规则 {rule['rule_id']} 没有有效的期望值表达式")
+            #logger.warning(f"规则 {rule['rule_id']} 没有有效的期望值表达式")
             return errors, {}
 
         # 筛选出满足条件且满足期望的数据行（正确配置的数据）
@@ -1255,72 +1237,73 @@ class ParameterChecker:
                         param_info = self._get_parameter_info(mo_name, param_name)
                         switch_descriptions = self._parse_value_descriptions(param_info['value_description'])
 
-                        error_switch_descriptions = []
+                        error_switch_descriptions = {}
                         for wrong_switch in wrong_switches:
                             switch_name = wrong_switch['switch_name']
                             if switch_name in switch_descriptions:
-                                error_switch_descriptions.append(f"{switch_name}: {switch_descriptions[switch_name]}")
-
+                                error_switch_descriptions[switch_name]= switch_descriptions[switch_name]
+                        base_error =row_dict.copy()
                         base_error = {
                             'sector_id': row_dict.get('f_site_id', "") + "_" + row_dict.get('f_cell_id', ""),
-                            'rule_id': rule['rule_id'],
+                            'data': row_dict,
                             'mo_name': mo_name,
                             'param_name': param_name,
-                            'check_type': '错配',
                             'error_type': '错配',
-                            'message': f'{param_name}开关配置错误',
                             'current_value': actual_value,
                             'expected_value': expected_param['expected_value'],
                             'wrong_switches': wrong_switches,
-                            'switch_descriptions': error_switch_descriptions,
-                            'condition': condition_expr,
                             'error_description': rule['error_description'],
-                            'row_index': idx
                         }
-                        
-                        # 创建增强的错误记录
-                        param_details = [{
-                            'param_name': param_name,
-                            'expected_value': expected_param['expected_value'],
-                            'current_value': actual_value,
-                            'parameter_description': param_info['parameter_description'],
-                            'value_description': param_info['value_description'],
-                            'parameter_type': param_info['parameter_type'],
-                            'wrong_switches': wrong_switches
-                        }]
-                        
-                        enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details, rule_chain)
+                        if condition_expr and condition_expr != 'nan':
+                            base_error['condition'] = condition_expr
+                        key = f'{mo_name}:{param_name}'
+                        param_entry = param_details.get(key)
+
+                        if param_entry:
+                            # 补充缺失的错误开关描述
+                            for switch, desc in error_switch_descriptions.items():
+                                param_entry['switch_descriptions'].setdefault(switch, desc)
+                        else:
+                            # 创建新的参数条目
+                            param_details[key] = {
+                                'param_name': param_name,
+                                'parameter_description': param_info['parameter_description'],
+                                'switch_descriptions': error_switch_descriptions.copy()  # 避免引用共享字典
+                            }
+
+                        enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details)
                         errors.append(enhanced_error)
                     else:
                         # 单值参数错配
                         param_info = self._get_parameter_info(mo_name, param_name)
-                        
+
                         base_error = {
                             'sector_id': row_dict.get('f_site_id', "") + "_" + row_dict.get('f_cell_id', ""),
-                            'rule_id': rule['rule_id'],
+                            'data': row_dict,
                             'mo_name': mo_name,
                             'param_name': param_name,
-                            'check_type': '错配',
                             'error_type': '错配',
-                            'message': f'{param_name}配置错误',
                             'current_value': actual_value,
                             'expected_value': expected_param['expected_value'],
-                            'condition': condition_expr,
                             'error_description': rule['error_description'],
-                            'row_index': idx
                         }
-                        
+                        if condition_expr and condition_expr != 'nan':
+                            base_error['condition'] = condition_expr
                         # 创建增强的错误记录
                         param_details = [{
                             'param_name': param_name,
-                            'expected_value': expected_param['expected_value'],
-                            'current_value': actual_value,
                             'parameter_description': param_info['parameter_description'],
                             'value_description': param_info['value_description'],
-                            'parameter_type': param_info['parameter_type']
                         }]
-                        
-                        enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details, rule_chain)
+                        # 创建增强的错误记录
+                        key = f'{mo_name}:{param_name}'
+                        if key not in param_details.keys():
+                            param_details[key] = {
+                                'param_name': param_name,
+                                'parameter_description': param_info['parameter_description'],
+                            }
+
+                        enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details)
                         errors.append(enhanced_error)
 
             # 只有满足期望的行才加入验证通过的数据中
@@ -1395,212 +1378,45 @@ class ParameterChecker:
             'value_description': ''
         }
 
-    def _get_parameter_value_description(self, mo_name: str, param_name: str) -> str:
-        """获取参数的值描述"""
-        param_info = self._get_parameter_info(mo_name, param_name)
-        return param_info['value_description']
-        
+
     def _get_mo_description(self, mo_name: str) -> str:
         """获取MO对象描述"""
         if mo_name in self.parameter_info:
             return self.parameter_info[mo_name].get('mo_description', '')
         return ''
-        
-    def _create_enhanced_error_record(self, base_error: Dict[str, Any], rule: Dict[str, Any], 
-                                    param_details: Optional[List[Dict[str, str]]] = None, 
-                                    rule_chain: Optional[List[str]] = None) -> Dict[str, Any]:
+
+    def _create_enhanced_error_record(self, base_error: Dict[str, Any], rule: Dict[str, Any],
+                                      param_details: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         """创建增强的错误记录，包含参数含义和规则关系"""
         enhanced_error = base_error.copy()
-        
-        # 添加MO描述
-        mo_name = enhanced_error.get('mo_name', '')
-        enhanced_error['mo_description'] = self._get_mo_description(mo_name)
-        
-        # 添加参数详细信息
-        if param_details:
-            enhanced_error['parameter_details'] = param_details
-        elif 'param_name' in enhanced_error:
-            param_name = enhanced_error['param_name']
-            param_info = self._get_parameter_info(mo_name, param_name)
-            enhanced_error['parameter_info'] = param_info
-            
-        # 添加规则关系链
-        if rule_chain:
-            enhanced_error['rule_chain'] = rule_chain
-            
+
         # 添加当前规则的完整信息
-        enhanced_error['rule_info'] = {
-            'rule_id': rule['rule_id'],
-            'check_type': rule['check_type'],
-            'condition_expression': rule['condition_expression'],
-            'expected_expression': rule['expected_expression'],
-            'next_check_id': rule.get('next_check_id', ''),
-            'error_description': rule['error_description']
-        }
-        
+        condition_expr = rule['condition_expression']
+        if condition_expr and condition_expr != 'nan':
+            enhanced_error['condition_expression'] = rule['condition_expression']
+
+        error_description = rule['error_description']
+        if error_description and error_description != 'nan':
+            enhanced_error['error_description'] = rule['error_description']
+
+        enhanced_error['expected_expression'] = rule['expected_expression']
+
         return enhanced_error
 
-    def _execute_single_chain(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], sector_id) -> List[Dict[str, Any]]:
+    def _execute_single_chain(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], sector_id) -> List[
+        Dict[str, Any]]:
         """执行单个验证链 - 返回该链的所有步骤"""
         chain_steps = []
         current_data = data_groups.copy()
         current_rule_id = rule_id
-        
-        logger.info(f"开始验证链: {rule_id}")
-        
-        while current_rule_id and current_rule_id in self.validation_rules:
-            rule = self.validation_rules[current_rule_id]
-            
-            # 执行当前规则
-            errors = self.execute_validation_rule(current_rule_id, current_data, sector_id, [])
-            
-            # 记录步骤（简化结构）
-            step = {
-                'rule_id': current_rule_id,
-                'type': rule['check_type'],
-                'mo': rule['mo_name'],
-                'desc': rule['error_description'][:20] + '...' if len(rule['error_description']) > 20 else rule['error_description'],
-                'status': 'pass' if not errors else 'fail',
-                'error_count': len(errors) if errors else 0,
-                'errors': errors[:2] if errors else None  # 最多保存2个错误详情
-            }
-            chain_steps.append(step)
-            
-            logger.info(f"  {current_rule_id}: {'PASS' if not errors else f'FAIL({len(errors)})'}")
-            
-            # 关键：如果失败，停止链；如果成功，继续下一个
-            if errors:
-                logger.info(f"  链停止于: {current_rule_id} (失败)")
-                break
-            
-            # 继续下一个规则
-            next_rule_id = rule.get('next_check_id', '')
-            if not next_rule_id or pd.isna(next_rule_id) or str(next_rule_id).strip() == '':
-                logger.info(f"  链结束于: {current_rule_id} (成功完成)")
-                break
-                
-            current_rule_id = str(next_rule_id).strip()
-        
-        return chain_steps
-    
-    def _get_passed_data(self, rule: Dict[str, Any], current_data: Dict[str, pd.DataFrame], errors: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
-        """获取通过验证的数据，只传递给下一个规则"""
-        # 如果没有错误，返回全部数据；如果有错误，返回空数据
-        if not errors:
-            return current_data
-        else:
-            # 返回空数据集，因为验证失败
-            return {mo_name: pd.DataFrame() for mo_name in current_data.keys()}
-    
-    def _format_validation_chain(self, chain_key: str, chain_errors: List[Dict[str, Any]]) -> str:
-        """格式化验证链条显示 - 显示完整链条，包括成功的步骤"""
-        # 解析链条中的规则
-        rule_steps = chain_key.split(' -> ')
-        formatted_parts = []
-        
-        for i, rule_id in enumerate(rule_steps):
-            # 检查该步骤是否有错误
-            step_errors = [e for e in chain_errors if e.get('rule_id') == rule_id]
-            
-            if step_errors:
-                error_summary = f"失败({len(step_errors)}个问题)"
-                formatted_parts.append(f"{rule_id}({error_summary})")
-            else:
-                formatted_parts.append(f"{rule_id}(检查没问题)")
-        
-        return ' -> '.join(formatted_parts)
-    
-    def _log_error_details(self, error: Dict[str, Any]) -> None:
-        """记录错误详情"""
-        error_type = error.get('error_type', error.get('check_type', 'unknown'))
-        logger.info(f"   ❌ 【{error_type}】{error.get('rule_id', 'N/A')} - {error['mo_name']}")
-        
-        # 显示参数信息
-        if 'param_name' in error:
-            logger.info(f"      📍 参数: {error['param_name']}")
-        elif 'param_names' in error:
-            logger.info(f"      📍 涉及参数: {', '.join(error['param_names'])}")
-            
-        logger.info(f"      🚫 错误: {error['message']}")
-        
-        # 根据错误类型显示不同信息
-        if error_type == '漏配':
-            # 漏配只显示期望配置什么，不显示实际值（因为没有配置）
-            if 'expected_value' in error:
-                logger.info(f"      🎯 需要配置: {error['expected_value']}")
-        elif error_type == '错配':
-            # 错配显示期望值和实际值
-            if 'current_value' in error and 'expected_value' in error:
-                logger.info(f"      🎯 期望值: {error['expected_value']}")
-                logger.info(f"      📊 实际值: {error['current_value']}")
-        
-        # 显示参数含义（如果有的话）
-        if 'parameter_info' in error:
-            param_info = error['parameter_info']
-            if param_info.get('parameter_description'):
-                logger.info(f"      💡 参数含义: {param_info['parameter_description']}")
-        elif 'parameter_details' in error:
-            # 处理多个参数的含义
-            for detail in error['parameter_details']:
-                if detail.get('parameter_description'):
-                    logger.info(f"      💡 {detail['param_name']}: {detail['parameter_description']}")
-        
-        # 处理多值参数的开关错误
-        if 'wrong_switches' in error and error['wrong_switches']:
-            logger.info(f"      🔧 开关错误详情:")
-            
-            # 获取开关描述信息
-            switch_descriptions = {}
-            if 'switch_descriptions' in error:
-                # 解析开关描述列表
-                for desc in error['switch_descriptions']:
-                    if ':' in desc:
-                        switch_name, desc_text = desc.split(':', 1)
-                        switch_descriptions[switch_name.strip()] = desc_text.strip()
-            elif 'parameter_details' in error and error['parameter_details']:
-                # 从参数详情中解析开关描述
-                param_detail = error['parameter_details'][0]
-                value_desc = param_detail.get('value_description', '')
-                switch_descriptions = self._parse_value_descriptions(value_desc)
-            
-            for switch_error in error['wrong_switches']:
-                switch_name = switch_error['switch_name']
-                expected_state = switch_error['expected_state']
-                actual_state = switch_error['actual_state']
-                
-                logger.info(f"         • {switch_name}: 期望{expected_state} ≠ 实际{actual_state}")
-                
-                # 显示开关含义（如果有的话）
-                if switch_name in switch_descriptions:
-                    logger.info(f"           含义: {switch_descriptions[switch_name]}")
-                elif 'description' in switch_error:
-                    logger.info(f"           含义: {switch_error['description']}")
-        
-        # 显示规则说明
-        if error.get('error_description') and error['error_description'] != 'nan':
-            logger.info(f"      📝 说明: {error['error_description']}")
-            
-        logger.info("")
 
-    def _log_simplified_error_details(self, errors: List[Dict[str, Any]]) -> None:
-        """简化的错误详情记录，避免重复信息"""
-        for error in errors:
-            error_type = error.get('error_type', error.get('check_type', 'unknown'))
-            # 简化显示格式，只显示核心信息
-            if 'param_name' in error:
-                logger.info(f"      📍 参数: {error['param_name']}")
-            elif 'param_names' in error:
-                logger.info(f"      📍 涉及参数: {', '.join(error['param_names'])}")
-            logger.info(f"      🚫 错误: {error['message']}")
-            
-            # 显示期望值和实际值
-            if error_type == '错配' and 'expected_value' in error and 'current_value' in error:
-                logger.info(f"      🎯 期望值: {error['expected_value']}")
-                logger.info(f"      📊 实际值: {error['current_value']}")
-            
-            # 显示参数含义（简化版）
-            if 'parameter_info' in error and error['parameter_info'].get('parameter_description'):
-                logger.info(f"      💡 {error['param_name']}: {error['parameter_info']['parameter_description']}")
+        logger.info(f"开始验证链: {rule_id}")
+
+        # 执行当前规则
+        self.execute_validation_rule(current_rule_id, current_data, sector_id, chain_steps)
+
+        return chain_steps
+
 
     def _parse_value_descriptions(self, value_description: str) -> Dict[str, str]:
         """
@@ -1618,154 +1434,38 @@ class ParameterChecker:
 
         return descriptions
 
-    def execute_validation_rule_with_tracking(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
-                                             sector_id, rule_chain: Optional[List[str]] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """执行验证规则并追踪规则链"""
-        if rule_chain is None:
-            rule_chain = []
-        
-        current_chain = rule_chain + [rule_id]
-        all_rule_chains = []
-        
-        # 执行规则并收集规则链信息
-        errors = self._execute_single_rule_with_tracking(rule_id, data_groups, sector_id, current_chain, all_rule_chains)
-        
-        return errors, all_rule_chains
-    
-    def _execute_single_rule_with_tracking(self, rule_id: str, data_groups: Dict[str, pd.DataFrame], 
-                                          sector_id, current_chain: List[str], 
-                                          all_rule_chains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """执行单个规则并记录规则链信息"""
-        rule = self.validation_rules[rule_id]
-        logger.info(f"执行验证规则: {rule_id} ({rule['check_type']}), 规则链: {' -> '.join(current_chain)}")
-        
-        # 记录规则链信息
-        chain_info = {
-            'chain': current_chain.copy(),
-            'rule_id': rule_id,
-            'rule_type': rule['check_type'],
-            'description': rule['error_description'],
-            'status': 'executed',
-            'has_errors': False
-        }
-        
-        # 执行具体的验证逻辑
-        if rule['check_type'] == '漏配':
-            errors, validated_data_groups = self._check_missing_config(rule, data_groups, sector_id, current_chain)
-        elif rule['check_type'] == '错配':
-            errors, validated_data_groups = self._check_incorrect_config(rule, data_groups, sector_id, current_chain)
-        else:
-            errors, validated_data_groups = [], data_groups
-        
-        # 更新规则链状态
-        if errors:
-            chain_info['has_errors'] = True
-            chain_info['error_count'] = len(errors)
-        
-        all_rule_chains.append(chain_info)
-        
-        # 如果没有发现错误且有下一个检查规则，继续执行
-        next_check_id = rule.get('next_check_id', '')
-        if not errors and next_check_id:
-            logger.info(f"规则 {rule_id} 通过，继续执行: {next_check_id}")
-            next_chain = current_chain + [next_check_id]
-            next_errors = self._execute_single_rule_with_tracking(next_check_id, validated_data_groups, 
-                                                                sector_id, next_chain, all_rule_chains)
-            errors.extend(next_errors)
-        else:
-            if errors:
-                logger.info(f"规则 {rule_id} 检查失败，不继续后续验证")
-        
-        return errors
 
-    def _generate_rule_execution_summary(self, executed_rule_chains: List[Dict[str, Any]], 
-                                       all_errors: List[Dict[str, Any]]) -> str:
-        """生成规则执行总结"""
-        summary_lines = []
-        summary_lines.append("\n\ud83d\udcca 规则执行流程总结:")
-        summary_lines.append("=" * 50)
-        
-        # 统计总体情况
-        total_chains = len(executed_rule_chains)
-        error_chains = len([chain for chain in executed_rule_chains if chain['has_errors']])
-        total_errors = len(all_errors)
-        
-        summary_lines.append(f"📊 总体统计:")
-        summary_lines.append(f"   • 执行规则链数: {total_chains}")
-        summary_lines.append(f"   • 有问题的规则链: {error_chains}")
-        summary_lines.append(f"   • 发现问题总数: {total_errors}")
-        summary_lines.append("")
-        
-        # 详细规则链分析
-        summary_lines.append(f"🔍 验证流程分析:")
-        
-        for i, chain in enumerate(executed_rule_chains, 1):
-            chain_str = " -> ".join(chain['chain'])
-            status = "❌ 有问题" if chain['has_errors'] else "✅ 通过"
-            
-            summary_lines.append(f"   {i}. {chain_str}")
-            summary_lines.append(f"      状态: {status}")
-            summary_lines.append(f"      类型: {chain['rule_type']}")
-            
-            if chain['has_errors']:
-                summary_lines.append(f"      问题数: {chain.get('error_count', 0)}")
-            
-            summary_lines.append(f"      说明: {chain['description']}")
-            summary_lines.append("")
-        
-        # 问题类型统计
-        if all_errors:
-            error_types = {}
-            for error in all_errors:
-                error_type = error.get('error_type', '未知')
-                error_types[error_type] = error_types.get(error_type, 0) + 1
-            
-            summary_lines.append(f"📊 问题类型分布:")
-            for error_type, count in error_types.items():
-                summary_lines.append(f"   • {error_type}: {count} 个")
-            summary_lines.append("")
-        
-        summary_lines.append("💡 建议:")
-        if total_errors == 0:
-            summary_lines.append("   • 所有验证规则都通过，配置正常！")
-        else:
-            summary_lines.append(f"   • 发现 {total_errors} 个配置问题，建议优先处理错配问题")
-            summary_lines.append("   • 检查规则链中的前置条件是否满足")
-        
-        summary_lines.append("=" * 50)
-        
-        return "\n".join(summary_lines)
 
     def _display_simple_validation_results(self, chain_errors: Dict[str, List[List[Dict[str, Any]]]]) -> None:
         """显示简化的验证结果 - 每个链独立显示"""
         total_sectors = len(chain_errors)
-        sectors_with_errors = sum(1 for chains in chain_errors.values() 
-                                if any(any(step['status'] == 'fail' for step in chain) for chain in chains))
-        
+        sectors_with_errors = sum(1 for chains in chain_errors.values()
+                                  if any(any(step['status'] == 'fail' for step in chain) for chain in chains))
+
         logger.info(f"🔍 检查结果总览 - 共{total_sectors}个扇区，{sectors_with_errors}个扇区有问题:")
-        
+
         for sector_id, all_chains in chain_errors.items():
             logger.info(f"\n📍 扇区 {sector_id} - {len(all_chains)}个验证链:")
-            
+
             for i, chain in enumerate(all_chains, 1):
                 # 生成链显示
                 chain_parts = []
                 total_errors = 0
-                
+
                 for step in chain:
                     if step['status'] == 'pass':
                         chain_parts.append(f"{step['rule_id']}(✓)")
                     else:
                         chain_parts.append(f"{step['rule_id']}(✗{step['error_count']})")
                         total_errors += step['error_count']
-                
+
                 chain_display = ' -> '.join(chain_parts)
-                
+
                 if total_errors == 0:
                     logger.info(f"   ✅ 链{i}: {chain_display}")
                 else:
                     logger.info(f"   ❌ 链{i}: {chain_display} (共{total_errors}个问题)")
-                    
+
                     # 只显示失败步骤的简化错误
                     for step in chain:
                         if step['status'] == 'fail' and step['errors']:
@@ -1773,25 +1473,14 @@ class ParameterChecker:
                             # 最多显示2个错误详情
                             for error in step['errors']:
                                 if 'param_name' in error:
-                                    logger.info(f"       📍 {error['param_name']}: 期望{error.get('expected_value', '?')}, 实际{error.get('current_value', '?')}")
+                                    logger.info(
+                                        f"       📍 {error['param_name']}: 期望{error.get('expected_value', '?')}, 实际{error.get('current_value', '?')}")
                                 else:
                                     logger.info(f"       📍 {error.get('message', '未知错误')}")
-                            
+
                             if step['error_count'] > 2:
                                 logger.info(f"       📝 +{step['error_count'] - 2}个相似问题...")
-    
-    def _format_complete_validation_chain(self, chain: Dict[str, Any]) -> str:
-        """格式化完整的验证链条显示，包括成功和失败的步骤"""
-        formatted_parts = []
-        
-        for step in chain['steps']:
-            if step['has_errors']:
-                error_count = len(step['errors'])
-                formatted_parts.append(f"{step['rule_id']}(失败({error_count}个问题))")
-            else:
-                formatted_parts.append(f"{step['rule_id']}(检查没问题)")
-        
-        return ' -> '.join(formatted_parts)
+
 
     def validate_sector_data(self, data_groups: Dict[str, pd.DataFrame], sector_id) -> List[List[Dict[str, Any]]]:
         """验证扇区数据 - 返回简单的验证链表"""
@@ -1808,7 +1497,7 @@ class ParameterChecker:
 
         # 每个入口规则开始一个独立的验证链
         all_chains = []
-        
+
         for rule_id in entry_rules:
             chain = self._execute_single_chain(rule_id, data_groups.copy(), sector_id)
             if chain:  # 只添加非空链
@@ -1948,7 +1637,6 @@ class ParameterChecker:
 
     def run_validation_example(self) -> None:
         """运行验证示例"""
-
 
         # 创建测试数据
         # 创建测试数据
@@ -2220,14 +1908,14 @@ class ParameterChecker:
             sector_result = self.validate_sector_data(sector_dfs, sector_id)
             # 数据结构 - 以sectorId为key，值为多个独立的验证链
             chain_errors[sector_id] = sector_result  # sector_result是多个链的列表
-        
+
         # 数据结构验证日志
         logger.info(f"📊 数据结构确认 - chain_errors以sectorId为key:")
         for sector_id, all_chains in chain_errors.items():
             total_chains = len(all_chains)
             total_errors = sum(sum(1 for step in chain if step['status'] == 'fail') for chain in all_chains)
             logger.info(f"   扇区 {sector_id}: {total_chains}个验证链, {total_errors}个失败步骤")
-        
+
         # 显示每个扇区的验证结果
         self._display_simple_validation_results(chain_errors)
 
@@ -2324,9 +2012,6 @@ class ParameterChecker:
 
         return None
 
-    def find_main_logical_op(self, expr: str) -> Optional[Tuple[int, int, str]]:
-        """旧版本，保持兼容性"""
-        return self.find_main_logical_op_safe(expr)
 
     def parse_atomic_expression(self, expr: str) -> List[Dict[str, Any]]:
         """
@@ -2336,7 +2021,6 @@ class ParameterChecker:
         expr = expr.strip()
         if not expr:
             return []
-
 
         # 检查是否被完整的括号包围
         if expr.startswith('(') and expr.endswith(')') and self.is_fully_wrapped_by_brackets(expr):
@@ -2356,7 +2040,6 @@ class ParameterChecker:
         if not expr:
             return None
 
-
         # 首先验证这个表达式中没有逻辑运算符（在括号外）
         if self.find_main_logical_op_safe(expr) is not None:
             logger.error(f"单个参数表达式中发现逻辑运算符: {expr}")
@@ -2375,10 +2058,6 @@ class ParameterChecker:
                         return self._parse_param_detail(param_name, param_value, operator)
 
         return None
-
-    def parse_single_param_fixed(self, expr: str) -> Optional[Dict[str, Any]]:
-        """旧版本，保持兼容性"""
-        return self.parse_single_parameter(expr)
 
 
 def main():
@@ -2408,7 +2087,6 @@ def main():
         import traceback
         traceback.print_exc()
         return False
-
 
 
 if __name__ == "__main__":
