@@ -984,6 +984,7 @@ class ParameterChecker:
 
 
         step = {
+            'rule_id': rule_id,  # Add missing rule_id field
             'type': rule['check_type'],
             'mo': rule['mo_name'],
             'desc': rule['error_description'],
@@ -1139,18 +1140,56 @@ class ParameterChecker:
 
         return errors, validated_data_groups
 
+    def _validate_row_for_missing_config(self, row_dict: Dict[str, Any], expected_result: Dict[str, Any], 
+                                        mo_name: str, rule: Dict[str, Any], sector_id: str) -> Dict[str, Any]:
+        """Row-centric validation for missing config: validate a single row against expected result"""
+        # Check expectation validation
+        row_meets_expectation = False
+        
+        if expected_result['type'] == 'complex':
+            # Complex expression validation
+            if self.validate_complex_expected_expression(expected_result['expression'], row_dict):
+                row_meets_expectation = True
+        else:
+            # Simple expression validation
+            all_params_match = True
+            for expected_param in expected_result['params']:
+                param_name = expected_param['param_name']
+                
+                if param_name not in row_dict:
+                    all_params_match = False
+                    break
+                
+                if expected_param['param_type'] == 'multiple':
+                    # Multi-value parameter check
+                    actual_value = row_dict[param_name]
+                    is_match, wrong_switches = self._check_multi_value_match(actual_value, expected_param['expected_switches'])
+                    if not is_match:
+                        all_params_match = False
+                        break
+                else:
+                    # Single value parameter check
+                    if row_dict[param_name] != expected_param['expected_value']:
+                        all_params_match = False
+                        break
+            
+            if all_params_match:
+                row_meets_expectation = True
+        
+        return {
+            'success': row_meets_expectation,
+            'errors': []  # Missing config errors are reported at sector level, not per row
+        }
+
     def _check_incorrect_config(self, rule: Dict[str, Any], data_groups: Dict[str, pd.DataFrame], sector_id) -> Tuple[
         List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
-        """检查错配"""
+        """检查错配 - 行中心验证方法"""
         mo_name = rule['mo_name']
         condition_expr = rule['condition_expression']
         expected_expr = rule['expected_expression']
 
         errors = []
-        param_details= {
-            'mo_name': mo_name,
-            'mo_description': self._get_mo_description(mo_name),
-        }
+        
         if mo_name not in data_groups:
             errors.append({
                 'sector_id': "",
@@ -1167,11 +1206,11 @@ class ParameterChecker:
             #logger.warning(f"规则 {rule['rule_id']} 没有有效的期望值表达式")
             return errors, {}
 
-        # 筛选出满足条件且满足期望的数据行（正确配置的数据）
+        # 行中心验证：为每行创建验证结果
         validated_data_groups = {}
         validated_rows = []
 
-        # 遍历所有数据行，检查错配并筛选正确配置
+        # 行中心验证：逐行进行验证并跟踪每行的验证状态
         for idx, row in mo_data.iterrows():
             row_dict = row.to_dict()
             row_dict = {k: str(v).strip() for k, v in row_dict.items()}
@@ -1180,135 +1219,19 @@ class ParameterChecker:
             if not self.parse_condition_expression(condition_expr, row_dict):
                 continue
 
-            # 检查期望值，确定是否满足期望
-            row_meets_expectation = False
-            incorrect_params = []
-
-            if expected_result['type'] == 'complex':
-                # 复杂表达式验证
-                if self.validate_complex_expected_expression(expected_result['expression'], row_dict):
-                    row_meets_expectation = True
-                else:
-                    # 复杂表达式不满足，检查具体哪个参数错误
-                    for expected_param in expected_result['params']:
-                        param_name = expected_param['param_name']
-                        if param_name not in row_dict:
-                            continue
-
-                        if expected_param['param_type'] == 'multiple':
-                            actual_value = row_dict[param_name]
-                            is_match, wrong_switches = self._check_multi_value_match(actual_value, expected_param[
-                                'expected_switches'])
-                            if not is_match:
-                                incorrect_params.append((expected_param, actual_value, wrong_switches))
-                        else:
-                            if row_dict[param_name] != expected_param['expected_value']:
-                                incorrect_params.append((expected_param, row_dict[param_name], None))
-            else:
-                # 简单表达式验证
-                all_params_match = True
-                for expected_param in expected_result['params']:
-                    param_name = expected_param['param_name']
-                    if param_name not in row_dict:
-                        continue
-
-                    if expected_param['param_type'] == 'multiple':
-                        actual_value = row_dict[param_name]
-                        is_match, wrong_switches = self._check_multi_value_match(actual_value,
-                                                                                 expected_param['expected_switches'])
-                        if not is_match:
-                            all_params_match = False
-                            incorrect_params.append((expected_param, actual_value, wrong_switches))
-                    else:
-                        if row_dict[param_name] != expected_param['expected_value']:
-                            all_params_match = False
-                            incorrect_params.append((expected_param, row_dict[param_name], None))
-
-                if all_params_match:
-                    row_meets_expectation = True
-
-            # 如果行不满足期望，报告错配
-            if not row_meets_expectation and incorrect_params:
-                for expected_param, actual_value, wrong_switches in incorrect_params:
-                    param_name = expected_param['param_name']
-
-                    if expected_param['param_type'] == 'multiple':
-                        # 多值参数错配
-                        param_info = self._get_parameter_info(mo_name, param_name)
-                        switch_descriptions = self._parse_value_descriptions(param_info['value_description'])
-
-                        error_switch_descriptions = {}
-                        for wrong_switch in wrong_switches:
-                            switch_name = wrong_switch['switch_name']
-                            if switch_name in switch_descriptions:
-                                error_switch_descriptions[switch_name]= switch_descriptions[switch_name]
-                        base_error =row_dict.copy()
-                        base_error = {
-                            'sector_id': row_dict.get('f_site_id', "") + "_" + row_dict.get('f_cell_id', ""),
-                            'data': row_dict,
-                            'mo_name': mo_name,
-                            'param_name': param_name,
-                            'error_type': '错配',
-                            'current_value': actual_value,
-                            'expected_value': expected_param['expected_value'],
-                            'wrong_switches': wrong_switches,
-                            'error_description': rule['error_description'],
-                        }
-                        if condition_expr and condition_expr != 'nan':
-                            base_error['condition'] = condition_expr
-                        key = f'{mo_name}:{param_name}'
-                        param_entry = param_details.get(key)
-
-                        if param_entry:
-                            # 补充缺失的错误开关描述
-                            for switch, desc in error_switch_descriptions.items():
-                                param_entry['switch_descriptions'].setdefault(switch, desc)
-                        else:
-                            # 创建新的参数条目
-                            param_details[key] = {
-                                'param_name': param_name,
-                                'parameter_description': param_info['parameter_description'],
-                                'switch_descriptions': error_switch_descriptions.copy()  # 避免引用共享字典
-                            }
-
-                        enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details)
-                        errors.append(enhanced_error)
-                    else:
-                        # 单值参数错配
-                        param_info = self._get_parameter_info(mo_name, param_name)
-
-                        base_error = {
-                            'sector_id': row_dict.get('f_site_id', "") + "_" + row_dict.get('f_cell_id', ""),
-                            'data': row_dict,
-                            'mo_name': mo_name,
-                            'param_name': param_name,
-                            'error_type': '错配',
-                            'current_value': actual_value,
-                            'expected_value': expected_param['expected_value'],
-                            'error_description': rule['error_description'],
-                        }
-                        if condition_expr and condition_expr != 'nan':
-                            base_error['condition'] = condition_expr
-                        # 创建增强的错误记录
-                        param_details = [{
-                            'param_name': param_name,
-                            'parameter_description': param_info['parameter_description'],
-                            'value_description': param_info['value_description'],
-                        }]
-                        # 创建增强的错误记录
-                        key = f'{mo_name}:{param_name}'
-                        if key not in param_details.keys():
-                            param_details[key] = {
-                                'param_name': param_name,
-                                'parameter_description': param_info['parameter_description'],
-                            }
-
-                        enhanced_error = self._create_enhanced_error_record(base_error, rule, param_details)
-                        errors.append(enhanced_error)
-
-            # 只有满足期望的行才加入验证通过的数据中
-            if row_meets_expectation:
+            # 为当前行创建验证结果跟踪
+            row_validation_result = self._validate_row_against_expectation(
+                row_dict, expected_result, mo_name, rule, sector_id
+            )
+            
+            # 如果行验证失败，将错误添加到错误列表
+            if not row_validation_result['success']:
+                errors.extend(row_validation_result['errors'])
+            
+            # 只有成功验证的行才会传递到下一个规则
+            if row_validation_result['success']:
                 validated_rows.append(row)
+
 
         # 构建返回的数据字典：只包含正确配置的数据行
         if validated_rows:
@@ -1320,6 +1243,134 @@ class ParameterChecker:
                 validated_data_groups[other_mo] = other_data
 
         return errors, validated_data_groups
+
+    def _validate_row_against_expectation(self, row_dict: Dict[str, Any], expected_result: Dict[str, Any], 
+                                         mo_name: str, rule: Dict[str, Any], sector_id: str) -> Dict[str, Any]:
+        """Row-centric validation: validate a single row against expected result"""
+        condition_expr = rule['condition_expression']
+        errors = []
+        param_details_dict = {}  # Consistent dict structure for parameter details
+        
+        # Check expectation validation
+        row_meets_expectation = False
+        incorrect_params = []
+        
+        if expected_result['type'] == 'complex':
+            # Complex expression validation
+            if self.validate_complex_expected_expression(expected_result['expression'], row_dict):
+                row_meets_expectation = True
+            else:
+                # Complex expression not satisfied, check which specific parameters are wrong
+                for expected_param in expected_result['params']:
+                    param_name = expected_param['param_name']
+                    if param_name not in row_dict:
+                        continue
+                    
+                    if expected_param['param_type'] == 'multiple':
+                        actual_value = row_dict[param_name]
+                        is_match, wrong_switches = self._check_multi_value_match(actual_value, expected_param['expected_switches'])
+                        if not is_match:
+                            incorrect_params.append((expected_param, actual_value, wrong_switches))
+                    else:
+                        if row_dict[param_name] != expected_param['expected_value']:
+                            incorrect_params.append((expected_param, row_dict[param_name], None))
+        else:
+            # Simple expression validation
+            all_params_match = True
+            for expected_param in expected_result['params']:
+                param_name = expected_param['param_name']
+                if param_name not in row_dict:
+                    continue
+                
+                if expected_param['param_type'] == 'multiple':
+                    actual_value = row_dict[param_name]
+                    is_match, wrong_switches = self._check_multi_value_match(actual_value, expected_param['expected_switches'])
+                    if not is_match:
+                        all_params_match = False
+                        incorrect_params.append((expected_param, actual_value, wrong_switches))
+                else:
+                    if row_dict[param_name] != expected_param['expected_value']:
+                        all_params_match = False
+                        incorrect_params.append((expected_param, row_dict[param_name], None))
+            
+            if all_params_match:
+                row_meets_expectation = True
+        
+        # If row doesn't meet expectation, create error records
+        if not row_meets_expectation and incorrect_params:
+            for expected_param, actual_value, wrong_switches in incorrect_params:
+                param_name = expected_param['param_name']
+                
+                if expected_param['param_type'] == 'multiple':
+                    # Multi-value parameter error
+                    param_info = self._get_parameter_info(mo_name, param_name)
+                    switch_descriptions = self._parse_value_descriptions(param_info['value_description'])
+                    
+                    error_switch_descriptions = {}
+                    for wrong_switch in wrong_switches:
+                        switch_name = wrong_switch['switch_name']
+                        if switch_name in switch_descriptions:
+                            error_switch_descriptions[switch_name] = switch_descriptions[switch_name]
+                    
+                    # Create parameter details for this error
+                    key = f'{mo_name}:{param_name}'
+                    param_details_dict[key] = {
+                        'param_name': param_name,
+                        'parameter_description': param_info['parameter_description'],
+                        'switch_descriptions': error_switch_descriptions.copy()
+                    }
+                    
+                    base_error = {
+                        'sector_id': row_dict.get('f_site_id', "") + "_" + row_dict.get('f_cell_id', ""),
+                        'data': row_dict,
+                        'mo_name': mo_name,
+                        'param_name': param_name,
+                        'error_type': '错配',
+                        'current_value': actual_value,
+                        'expected_value': expected_param['expected_value'],
+                        'wrong_switches': wrong_switches,
+                        'error_description': rule['error_description'],
+                        'param_details': param_details_dict[key]  # Add parameter knowledge to error
+                    }
+                    if condition_expr and condition_expr != 'nan':
+                        base_error['condition'] = condition_expr
+                    
+                    enhanced_error = self._create_enhanced_error_record(base_error, rule, [param_details_dict[key]])
+                    errors.append(enhanced_error)
+                else:
+                    # Single-value parameter error
+                    param_info = self._get_parameter_info(mo_name, param_name)
+                    
+                    # Create parameter details for this error
+                    key = f'{mo_name}:{param_name}'
+                    param_details_dict[key] = {
+                        'param_name': param_name,
+                        'parameter_description': param_info['parameter_description'],
+                        'value_description': param_info['value_description']
+                    }
+                    
+                    base_error = {
+                        'sector_id': row_dict.get('f_site_id', "") + "_" + row_dict.get('f_cell_id', ""),
+                        'data': row_dict,
+                        'mo_name': mo_name,
+                        'param_name': param_name,
+                        'error_type': '错配',
+                        'current_value': actual_value,
+                        'expected_value': expected_param['expected_value'],
+                        'error_description': rule['error_description'],
+                        'param_details': param_details_dict[key]  # Add parameter knowledge to error
+                    }
+                    if condition_expr and condition_expr != 'nan':
+                        base_error['condition'] = condition_expr
+                    
+                    enhanced_error = self._create_enhanced_error_record(base_error, rule, [param_details_dict[key]])
+                    errors.append(enhanced_error)
+        
+        return {
+            'success': row_meets_expectation,
+            'errors': errors,
+            'param_details': param_details_dict
+        }
 
     def _check_multi_value_match(self, actual_value: str, expected_switches: Dict[str, str]) -> Tuple[
         bool, List[Dict[str, str]]]:
