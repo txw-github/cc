@@ -17,7 +17,7 @@ param_details = {
 
 }
 
-result = {}
+totaol_result = {}
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
